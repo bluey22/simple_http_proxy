@@ -1,5 +1,5 @@
-# csds-325-p1
-HTTP Proxy and Load Balancer
+# HTTP Proxy and Load Balancer
+By Ben Luo, for the first project of CSDS 325: Networks
 
 # VM Commands: 
 ```bash
