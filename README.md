@@ -1,7 +1,17 @@
 # HTTP Proxy and Load Balancer
-By Ben Luo, for the first project of CSDS 325: Networks
+**Project 1 for CSDS 325: Networks**  
+**@bluey22**  
 
-# VM Commands: 
+## Project Description
+Implement a combination of an HTTP proxy and a load balancer to explore:
+- Non-blocking connection handling
+- Fault tolerance
+- Scalability
+- Proxies in distributed systems
+- Pipelining
+- Nginx, Wireshark
+
+# VirtualBox Commands: 
 ```bash
 # View Actively Running VMs
 VBoxManage list runningvms
