@@ -60,18 +60,23 @@ class ProxyServer:
         """
         try:
             while True:
-                events = self.epoll.poll(1)  # one second wait
+                events = self.epoll.poll(1)  # one second wait before checking events
+
                 for file_no, event in events:
-                    if file_no == self.server_socket.fileno():  # new client is connecting
+                    if file_no == self.server_socket.fileno():  
+                        # Case 1: New client is connecting
                         self.accept_connection()
 
-                    elif event & (select.EPOLLIN | select.EPOLLPRI):  # data from client (new data or connection closed b'')
+                    elif event & (select.EPOLLIN | select.EPOLLPRI):  
+                        # Case 2: Data from client (new data or connection closed packet)
                         self.receive_data(file_no)
 
-                    elif event & select.EPOLLOUT:  # socket is ready to send data
+                    elif event & select.EPOLLOUT:  
+                        # Case 3: Socket is ready to send data
                         self.send_data(file_no)
 
-                    elif event in BITERRS:  # error handling
+                    elif event in BITERRS:  
+                        # Case 4: error handling
                         self.close_connection(file_no)
         finally:
             self.shutdown()
