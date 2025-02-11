@@ -4,7 +4,6 @@ import select
   
 ECHO_PORT = 9999
 BUF_SIZE = 4096
-biterrs = select.EPOLLERR | select.EPOLLHUP | select.EPOLLRDHUP
 
 def main():
     print("----- Echo Server -----")
@@ -63,7 +62,7 @@ def main():
                         connections[fileNo].close()
                         del connections[fileNo], responses[fileNo]
 
-                elif event in bitters:
+                elif event in biterrs:
                     epoll.unregister(fileNo)
                     connections[fileNo].close()
                     del connections[fileNo], responses[fileNo]

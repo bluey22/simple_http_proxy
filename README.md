@@ -1,4 +1,4 @@
-# HTTP Proxy and Load Balancer
+# HTTP (Reverse) Proxy and Load Balancer
 **Project 1 for CSDS 325: Networks**  
 **@bluey22**  
 
