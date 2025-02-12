@@ -1,12 +1,15 @@
 # proxy.py
-# import sys
-# import json
+import sys
+import json
 import socket
 import select
-# import uuid  
+import uuid  
+from typing import Dict
+from collections import deque as queue
 
-LISTENER_ADDRESS = '0.0.0.0'  # available on all network interfaces
-LISTENER_PORT = 8888
+# LISTENER_ADDRESS = '0.0.0.0'  # available on all network interfaces
+LISTENER_ADDRESS = '127.0.0.1'
+LISTENER_PORT = 9000
 BUF_SIZE = 4096
 BITERRS = [25,24,8,16,9,17,26,10,18]
 BUF_SIZE = 4096
@@ -21,18 +24,44 @@ EPOLLERR: Error occurred.
 EPOLLOUT: Triggered when a socket is ready to send data without blocking
 """
 
+def log(*args):
+    print("[proxy]", *args)
+
 class ProxyServer:
     def __init__(self, backend_config_path, proxy_host=LISTENER_ADDRESS, proxy_port=LISTENER_PORT):
         self.proxy_host = proxy_host 
         self.proxy_port = proxy_port
 
         # Load backend servers from JSON Config
-        # ...TODO
+        self.backend_servers = self.load_servers_config(backend_config_path)
 
-        self.server_socket = None  # main socket instance
-        self.epoll = None  # monitors socket events
-        self.connections = {}  # maps { key = file_no : value = socket object}
-        self.responses = {}  # maps { key = file_no : value = socket object}
+        # Main socket instance and event monitor (Needs call to setup_server())
+        self.server_socket = None
+        self.epoll = None
+
+        # Connections, Buffers, and Queues:
+        #   Client -> Proxy -> Backend Servers: Store all sockets, 1 socket ONLY for each -> pairing
+        #   Client <-HTTP-> Proxy, Proxy <-HTTP-> Backend Servers: Store buffers for partial/multiple requests (pipelining)
+        #   HTTP Queues: We may receive partial+multiple HTTP Requests/Responses per Epoll event, we need 
+        #                to queue them in order as we assemble them and pop them when we handle them (TODO) 
+
+        # Connections: File descriptor to Master Map, Contains All Sockets
+        self.fd_to_socket: Dict[int, socket.socket] = {}        # { key=file_no (any socket) : val=socket object} 
+
+        # Connections: File descriptor to File descriptor
+        self.client_to_backend: Dict[int, int] = {}  # { key=file_no (client) : val=file_no (backend_server)} 
+        self.backend_to_client: Dict[int, int] = {}  # { key=file_no (backend_server) : val=file_no (client)} 
+        
+        # Buffers: Client to Proxy, Proxy to Backend (All from Proxy POV)
+        self.client_buffers: Dict[int, Dict[str, Dict[str, bytes]]] = {}     # { key=file_no : val={ "read_buffer" : { x-request-id: b'' }, "write_buffer" : { x-request-id: b'' } } }
+        self.backend_buffers: Dict[int, Dict[str, Dict[str, bytes]]] = {}    # { key=file_no : val={ "read_buffer" : { x-request-id: b'' }, "write_buffer" : { x-request-id: b'' } } } 
+        self.partial_http_requests: Dict[int, bytes] = {}         # { key=file_no : val=b'' (client or backend)} 
+        self.partial_http_response: Dict[int, bytes] = {}         # { key=file_no : val=b'' (client or backend)} 
+
+        # Queues: Request Handling 
+        self.conn_to_http_requests_order: Dict[int, queue[str]] = {}  # { key=file_no : val=queue(x-request-ids) (client)} 
+        self.req_to_client: Dict[str, int] = {}                       # { key=X-Request-ID : val=file_no (client)}
+
 
     def setup_server(self):
         """
@@ -45,7 +74,8 @@ class ProxyServer:
             self.server_socket.bind((self.proxy_host, self.proxy_port))
             self.server_socket.listen(5)  # allow up to 5 queued connections
             self.server_socket.setblocking(False)  # non-blocking (accept(), recv(), and send() return immediately)
-            
+            self.fd_to_socket[self.server_socket.fileno()] = self.server_socket  # register listener in dictionary
+
             # 2. Set up epoll for non-blocking IO
             self.epoll = select.epoll()
             self.epoll.register(self.server_socket.fileno(), READ_ONLY)  # register file descriptor as read only
@@ -55,9 +85,8 @@ class ProxyServer:
             exit(1)
 
     def run(self):
-        """
-        Runs the ProxyServer and listens for events with epoll
-        """
+        """Runs the ProxyServer and listens for events with epoll"""
+        log(f"Starting proxy on {self.proxy_host}:{self.proxy_port}")
         try:
             while True:
                 events = self.epoll.poll(1)  # one second wait before checking events
@@ -68,7 +97,7 @@ class ProxyServer:
                         self.accept_connection()
 
                     elif event & (select.EPOLLIN | select.EPOLLPRI):  
-                        # Case 2: Data from client (new data or connection closed packet)
+                        # Case 2: Data from client/backend (new data or connection closed packet)
                         self.receive_data(file_no)
 
                     elif event & select.EPOLLOUT:  
@@ -138,10 +167,14 @@ class ProxyServer:
             self.close_connection(file_no)
     
     # -------------------------- Helper Methods ---------------------------------
+    def load_servers_config(self, config_path):
+        """Load backend servers list from a JSON config file"""
+        with open(config_path, 'r') as f:
+            data = json.load(f)
+        return data["backend_servers"]
+
     def close_connection(self, file_no):
-        """
-        Closes connection socket and deletes relevant data
-        """
+        """Closes connection socket and deletes relevant data"""
         if file_no in self.connections:
             self.epoll.unregister(file_no)  # untrack from epoll
             self.connections[file_no].close()  # close socket
@@ -149,9 +182,7 @@ class ProxyServer:
             print(f"Closed connection {file_no}")
     
     def shutdown(self):
-        """
-        Shuts down the ProxyServer instance
-        """
+        """Shuts down the ProxyServer instance"""
         print("Shutting down server...")
         if self.epoll:
             self.epoll.unregister(self.server_socket.fileno())  # untrack server socket from epoll
@@ -160,3 +191,6 @@ class ProxyServer:
             self.server_socket.close()  # close server socket
         print("Server shut down.")
 
+    def load_backend_servers(self, config_file_path):
+        # TODO:
+        pass

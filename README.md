@@ -3,13 +3,13 @@
 **@bluey22**  
 
 ## Project Description
-Implement a combination of an HTTP proxy and a load balancer to explore:
-- Non-blocking connection handling
+Implement a combination of an HTTP 1.1 proxy and a load balancer to explore:
+- Non-blocking connection handling w/ epoll
 - Fault tolerance
 - Scalability
 - Proxies in distributed systems
-- Pipelining
-- Nginx, Wireshark
+- Pipelining with Head-of-Line blocking
+- Nginx, Wireshark, wrk
 
 ## VirtualBox Commands: 
 ```bash
@@ -68,3 +68,6 @@ Modify send_data() to Handle Responses
 - Route the response to the correct client using this identifier.
 
 Update Nginx to Preserve the Header
+
+## epoll
+epoll is a Linux-specific high-performance I/O event notification mechanism in the kernel space that efficiently monitors multiple file descriptors to detect when they become ready for I/O operations. Unlike select and poll, which require checking all file descriptors on every call, epoll only processes active file descriptors. We can configure it to be edge-triggered (on event and only once) or level-triggered (continuously set while an event condition holds - similar performance to select).
