@@ -30,7 +30,7 @@ class MessageBuilderHTTP:
 
         Example workflow: Create object, call parse_data() then check is_complete() after
         """
-        offset = 0
+        offset = 0  # okay at 0, always relative to len(data)
         length = len(data)
 
         # 1) If headers not received, parse them
@@ -52,13 +52,13 @@ class MessageBuilderHTTP:
         if self.headers_received:
             body_needed = self.content_length - self.body_received
 
-            if body_needed > 0 and offset < length:
-                can_take = min(body_needed, length - offset)
-                self.body_data.extend(data[offset: offset + can_take])
-                self.body_received += can_take
-                offset += can_take
+            if body_needed > 0 and offset < length:  # not full body and still data to parse
+                can_take = min(body_needed, length - offset)  # don't read beyond what we need or received
+                self.body_data.extend(data[offset: offset + can_take])  # slice of data containing next piece of body (append without replace = extend)
+                self.body_received += can_take  # update how much of the body we've received
+                offset += can_take  # update our offset by what we've been taking
 
-        return offset
+        return offset  # Potentially useful so the server can track how much data was processed, but we just call is_complete()
 
     def parse_header_lines(self, header_part: bytes):
         """
