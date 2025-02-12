@@ -109,14 +109,6 @@ class MessageBuilderHTTP:
     def is_complete(self) -> bool:
         """Returns True if MessageBuilderHTTP is a complete HTTP message"""
         return (self.headers_received and (self.body_received >= self.content_length))
-
-    def build_full_message(self) -> bytes:
-        """Returns the final raw HTTP message"""
-        raw_headers = bytes(self.header_buffer)
-        separator = raw_headers.find(b"\r\n\r\n")
-        if separator == -1:
-            return raw_headers + self.body_data
-        return raw_headers + self.body_data
     
     def build_full_message(self) -> bytes:
         """Returns the final raw HTTP message"""
