@@ -3,16 +3,17 @@ from collections import deque as queue
 from utils import SocketType
 from message_builder_http import MessageBuilderHTTP
 
-class SocketHTTP:
+class SocketContext:
     """
     A Data-Access Object (DAO) that stores information based on a socket connection efficiently
     for HTTP interactions, along with the socket itself. You will have one of these persistent
     SocketHTTP connections for each client (and for each backend, on the other side of the proxy)
     """
-    def __init__(self, socket, address):
+    def __init__(self, socket):
         self.socket_type: SocketType = None  # Enum, CLIENT_TO_PROXY or PROXY_TO_BACKEND
         self.file_descriptor: int = -1
         self.socket = socket
+        self.address: str = ""
 
         # Buffer Level 0: Socket Direct
         self.recv_buffer = bytearray()  # Can be reading a response to pass forward, or a request

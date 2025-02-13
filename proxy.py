@@ -7,7 +7,8 @@ import uuid
 import logging
 from typing import Dict
 from message_builder_http import MessageBuilderHTTP
-from connection import SocketHTTP
+from connection import SocketContext
+from utils import SocketType
 
 # --------------------------------- Constants --------------------------------------
 LISTENER_ADDRESS = "127.0.0.1"  # or '0.0.0.0', available on all network interfaces
@@ -44,7 +45,7 @@ class ProxyServer:
         self.proxy_port = proxy_port
 
         # 1) Load backend servers from JSON Config
-        self.backend_servers = self.load_servers_config(backend_config_path)
+        self.backend_servers = self.load_backend_servers(backend_config_path)
         self.num_backends = len(self.backend_servers)
         self.backend_index = 0  # for round-robin
 
@@ -53,11 +54,15 @@ class ProxyServer:
         self.epoll: select.epoll = None
 
         # 3) Data Stores
-        # Connections: File descriptor to Master Map, Contains All Sockets
-        self.fd_to_socket: Dict[int, SocketHTTP] = {}  # { key=file_no (any socket) : val=SocketHTTP object}
+        # Maps File descriptor to Socket, SocketContext
+        self.fd_to_socket: Dict[int, socket.socket] = {}    # { key=file_no (any socket) : val=socket.socket}
+        self.fd_to_socket_context: Dict[int, SocketContext] = {}  # { key=file_no (any socket) : val=SocketHTTP object}
+        
+        # Maps x-request-id to client-fd
+        self.req_to_client: Dict[str, int] = {}  # { key=X-Request-ID : val=file_no (client)}
 
-        # Connections: Maps x-request-id to client-fd
-        self.req_to_client: Dict[str, int] ={}  # { key=X-Request-ID : val=file_no (client)}
+        # Maps address to fd: Map round robin address to exising connection from proxy
+        self.address_to_fd: Dict[str, int] = {} # { key=IP-Address : val=file_no (backend)}
 
     def setup_server(self):
         """
@@ -71,6 +76,7 @@ class ProxyServer:
             self.server_socket.listen(5)  # allow up to 5 queued connections
             self.server_socket.setblocking(False)  # non-blocking (accept(), recv(), and send() return immediately)
             self.fd_to_socket[self.server_socket.fileno()] = (self.server_socket)  # register file descriptor to socket object
+            # Note: No register with self.fd_to_socket_context since this is purely the frontend socket for the proxy
 
             # 2. Set up epoll for non-blocking IO
             self.epoll = select.epoll()
@@ -114,76 +120,28 @@ class ProxyServer:
         conn.setblocking(False)
         conn_file_no = conn.fileno()
 
+        # Register the socket file descriptor
         self.fd_to_socket[conn_file_no] = conn
         self.epoll.register(conn_file_no, READ_ONLY)
 
-        # Initialize an empty ephemeral parse state for the socket (buffer)
-        self.parse_state_request[conn_file_no] = MessageBuilderHTTP()
-
-        # Initialize read and write buffers for the socket
-        self.client_buffers[conn_file_no] = {
-                "read_buffer": {},
-                "write_buffer": {}
-            }
-        
-        self.connections[conn.fileno()] = conn
-        self.responses[conn.fileno()] = b""
+        # Register the context object for this socket (SocketHTTP)
+        conn_context = SocketContext(conn)
+        conn_context.socket_type = SocketType.CLIENT_TO_PROXY
+        conn_context.current_request = MessageBuilderHTTP()
+        conn_context.current_response = MessageBuilderHTTP()
+        self.fd_to_socket_context[conn_file_no] = conn_context
         print(f"New connection from {addr}")
 
-    def receive_data(self, file_no):
-        """
-        Check file descriptor for data and store it. Close connection if data is empty
-        """
-        try:
-            recv_data = self.connections[file_no].recv(BUF_SIZE)
-            if not recv_data:
-                # Will we prematurely close the connection in receive_data()? A: No, because we got here due to an epoll event trigger
-                self.close_connection(file_no)
-                return
-            self.responses[file_no] += recv_data  # store the received data in a buffer
-            self.epoll.modify(
-                file_no, READ_WRITE
-            )  # immediately prepare socket for an EPOLLOUT event to flush our send data back (ECHO SERVER ARTIFACT - TODO:  Wait to ensure we receive the end of the HTTP REQ!)
+    def handle_read_event(self, file_no):
+        #TODO
+        pass
 
-        except (ConnectionResetError, BrokenPipeError) as e:
-            print(f"Error in receive_data for fd={file_no}: {e}")
-            self.close_connection(file_no)
-
-    def send_data(self, file_no):
-        """
-        Write data in the file descriptor to the Client
-        If the buffer to store data to send to the client is empty,
-        modify file descriptor to only listen to new data
-        """
-        try:
-            bytes_written = self.connections[file_no].send(
-                self.responses[file_no]
-            )  # retrieve socket for file_no, and send all the response data stored (ECHO SERVER ARTIFACT - TODO:  Wait to ensure we receive the end of the HTTP REQ!)
-
-            # B/c send does not gurantee a full send: we wrote as much as we could
-            # (OS moves data into the send buffer to then send when available)
-            # We shorten our response data by removing the front bytes that were sent
-            self.responses[file_no] = self.responses[file_no][bytes_written:]
-
-            # NOTE: EPOLLOUT remains enabled due to us using the level-triggered, so we can retry this operation again
-            # NOTE: In Edge-Triggered, we have to read and write completely, this is why we add a while true and check for BlockingIOError
-            #           Because we need a way not to block if there's no data, but also can't say data = b'' because that would be a fin packet
-            #               to close the connection (which we don't want)
-
-            if (
-                len(self.responses[file_no]) == 0
-            ):  # if we wrote all the data, we can turn the socket back to read only
-                self.epoll.modify(file_no, READ_ONLY)
-
-        except (
-            ConnectionResetError,
-            BrokenPipeError,
-        ) as e:  # client has already forcefully closed the connection
-            print(f"Error in send_data for fd={file_no}: {e}")
-            self.close_connection(file_no)
+    def handle_write_event(self, file_no):
+        #TODO
+        pass
 
     # -------------------------- Helper Methods ---------------------------------
-    def load_servers_config(self, config_path):
+    def load_backend_servers(self, config_path):
         """Load backend servers list from a JSON config file"""
         with open(config_path, "r") as f:
             data = json.load(f)
@@ -191,13 +149,12 @@ class ProxyServer:
 
     def close_connection(self, file_no):
         """Closes connection socket and deletes relevant data"""
-        if file_no in self.connections:
+        if file_no in self.fd_to_socket:
             self.epoll.unregister(file_no)  # untrack from epoll
-            self.connections[file_no].close()  # close socket
-            del (
-                self.connections[file_no],
-                self.responses[file_no],
-            )  # delete from tracking dictionaries
+            self.fd_to_socket[file_no].close()  # close socket
+            del (self.fd_to_socket[file_no])
+            if file_no in self.fd_to_socket_context:
+                del (self.fd_to_socket_context[file_no])
             print(f"Closed connection {file_no}")
 
     def shutdown(self):
@@ -211,7 +168,3 @@ class ProxyServer:
         if self.server_socket:
             self.server_socket.close()  # close server socket
         print("Server shut down.")
-
-    def load_backend_servers(self, config_file_path):
-        # TODO:
-        pass
