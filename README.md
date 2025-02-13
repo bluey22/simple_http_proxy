@@ -37,7 +37,7 @@ server {
     server_name localhost;
 
     location / {
-        root /var/www/site_8001;
+        root /var/www/html;
         index index.html;
 
         # Preserve X-Request-ID from incoming requests
@@ -48,21 +48,11 @@ server {
     }
 }
 
-# /var/www/site_8001/index.html
-echo '<!DOCTYPE html>
-<html>
-<head>
-    <title>Server 8001</title>
-    <style>
-        body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }
-        h1 { color: #007bff; }
-    </style>
-</head>
-<body>
-    <h1>Welcome to Server 8001</h1>
-    <p>This is a simple lightweight web page running on port 8001.</p>
-</body>
-</html>' | sudo tee /var/www/site_8001/index.html
+# /var/www/html/index.html
+sudo mkdir -p /var/www/html
+echo "<h1>Welcome to the Load-Balanced Web Service</h1>" | sudo tee /var/www/html/index.html
+sudo chmod -R 755 /var/www/html
+sudo chown -R www-data:www-data /var/www/html
 ```
 
 Symbolically link these to ```bash/sites-enabled/``` so that nginx loads them on startup.
