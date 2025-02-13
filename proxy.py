@@ -5,9 +5,9 @@ import socket
 import select
 import uuid
 import logging
-from typing import Dict, Optional
-from collections import deque as queue
+from typing import Dict
 from message_builder_http import MessageBuilderHTTP
+from connection import SocketHTTP
 
 # --------------------------------- Constants --------------------------------------
 LISTENER_ADDRESS = "127.0.0.1"  # or '0.0.0.0', available on all network interfaces
@@ -32,7 +32,6 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
-
 # -------------------------------- Server Class --------------------------------------
 class ProxyServer:
     """
@@ -53,48 +52,12 @@ class ProxyServer:
         self.server_socket: socket.socket = None
         self.epoll: select.epoll = None
 
-        # ----------------------------------------------------------------
-        # Data Stores: Connections, Buffers, and Queues
-        # ----------------------------------------------------------------
-
+        # 3) Data Stores
         # Connections: File descriptor to Master Map, Contains All Sockets
-        self.fd_to_socket: Dict[int, socket.socket] = (
-            {}
-        )  # { key=file_no (any socket) : val=socket object}
+        self.fd_to_socket: Dict[int, SocketHTTP] = {}  # { key=file_no (any socket) : val=SocketHTTP object}
 
         # Connections: Maps x-request-id to client-fd
-        self.req_to_client: Dict[str, int] = (
-            {}
-        )  # { key=X-Request-ID : val=file_no (client)}
-
-        # Connections: File descriptor to File descriptor
-        self.client_to_backend: Dict[int, int] = (
-            {}
-        )  # { key=file_no (client) : val=file_no (backend_server)}
-
-        self.backend_to_client: Dict[int, int] = (
-            {}
-        )  # { key=file_no (backend_server) : val=file_no (client)}
-
-        # Buffers: Client to Proxy, Proxy to Backend
-        #     client_buffers[client_fd]["read_buffer"][x_req_id] = b'full request'
-        #     backend_buffers[client_fd]["write_buffer"][x_req_id] = b'data to send to proxy'
-        self.client_buffers: Dict[int, Dict[str, Dict[str, bytearray]]] = (
-            {}
-        )  # { key=file_no : val={ "read_buffer" : { x-request-id: b'' }, "write_buffer" : { x-request-id: b'' } } }
-        
-        self.backend_buffers: Dict[int, Dict[str, Dict[str, bytearray]]] = (
-            {}
-        )  # { key=file_no : val={ "read_buffer" : { x-request-id: b'' }, "write_buffer" : { x-request-id: b'' } } }
-
-        # Buffers: Ephemeral states Each fd may contain a "MessageBuilderHTTP" on a partial parse
-        self.parse_state_request: Dict[int, MessageBuilderHTTP] = {}  # for clients
-        self.parse_state_response: Dict[int, MessageBuilderHTTP] = {}  # for backends
-
-        # Queues: Per-client queue of x-request-ids (for pipelining order)
-        self.conn_to_http_requests_order: Dict[int, queue[str]] = (
-            {}
-        )  # { key=file_no : val=queue(x-request-ids) (client)}
+        self.req_to_client: Dict[str, int] ={}  # { key=X-Request-ID : val=file_no (client)}
 
     def setup_server(self):
         """

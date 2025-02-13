@@ -2,6 +2,9 @@
 **Project 1 for CSDS 325: Networks**  
 **@bluey22**  
 
+Python: 3.10.12
+Linux: 22.0.4 Ubuntu
+
 ## Project Description
 Implement a combination of an HTTP 1.1 proxy and a load balancer to explore:
 - Non-blocking connection handling w/ epoll

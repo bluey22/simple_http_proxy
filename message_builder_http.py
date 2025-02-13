@@ -2,11 +2,12 @@
 
 class MessageBuilderHTTP:
     """
-    A lightweight state object to accumulate information about a complete HTTP request
+    A lightweight state object to accumulate information about a complete HTTP request/response
     """
     def __init__(self):
         self.is_response = False
         self.headers_received = False
+        self.x_request_id = None
         self.header_buffer = bytearray()     # partial header
         self.headers = {}                    # final parsed headers (Host, User-Agent, Content-Length, etc.)
         self.method = ''                     # e.g. GET, POST, ...
@@ -89,6 +90,8 @@ class MessageBuilderHTTP:
             if ":" in line_dec:
                 k, v = line_dec.split(":", 1)
                 self.headers[k.strip()] = v.strip()
+                if k == 'X-Request-ID':
+                    self.x_request_id = v
 
         # 3) Get content length based on this map of headers
         cl = self.headers.get("Content-Length", "0")
