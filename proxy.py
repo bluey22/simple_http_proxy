@@ -1,5 +1,4 @@
 # proxy.py
-import sys
 import json
 import socket
 import select
@@ -181,6 +180,7 @@ class ProxyServer:
                     if builder.is_complete():
                         # Handle complete message for Client Request
                         if socket_context.socket_type == SocketType.CLIENT_TO_PROXY:
+                            logging.info(f"[FROM CLIENT] Received request: {builder.method} {builder.path} Headers: {builder.headers}")
                             self._handle_complete_client_request(socket_context, builder)
 
                             if i == 0:  # Reset builder if it was the first message
@@ -188,6 +188,7 @@ class ProxyServer:
 
                         # Handle complete message for Backend Response
                         else:
+                            logging.info(f"[FROM BACKEND] Received response: {builder.method} {builder.path} Headers: {builder.headers}")
                             self._handle_complete_backend_response(socket_context, builder)
                             
                             if i == 0:  # Reset builder if it was the first message
@@ -244,13 +245,15 @@ class ProxyServer:
             # NOTE: Validation and preprocessing comes from message handling. A promotion to the send buffer is a 
             #       final promotion, meaning we can just send all we can
             if len(socket_context.send_buffer) > 0:
-                sent = sock.send(socket_context.send_buffer)
+                sent = sock.sendall(socket_context.send_buffer)  # NOTE: Testing sendall
+                logging.info(f"Response sent to client: {socket_context.address}")
 
                 if sent > 0:
                     # Remove sent data from buffer
                     socket_context.send_buffer = socket_context.send_buffer[sent:]
 
                     # If buffer is empty, prepare next message if available
+                    # NOTE: We do this because we only ever 'put' one message to the send_buffer
                     if len(socket_context.send_buffer) == 0:
                         if socket_context.socket_type == SocketType.CLIENT_TO_PROXY:
                             # For client, prepare next response
@@ -442,12 +445,12 @@ class ProxyServer:
             del (self.fd_to_socket[file_no])
             if file_no in self.fd_to_socket_context:
                 del (self.fd_to_socket_context[file_no])
-            print(f"Closed connection {file_no}")
+            logging.info(f"Closed connection to {self.fd_to_socket_context[file_no].address}")
 
 
     def shutdown(self):
         """Shuts down the ProxyServer instance"""
-        print("Shutting down server...")
+        logging.info("Shutting down server...")
 
         # 1) Close all connection sockets
         for fd, sock in self.fd_to_socket.items():
