@@ -39,6 +39,12 @@ server {
     location / {
         root /var/www/site_8001;
         index index.html;
+
+        # Preserve X-Request-ID from incoming requests
+        proxy_set_header X-Request-ID $http_x_request_id;
+
+        # Ensure Nginx includes it in the response
+        add_header X-Request-ID $http_x_request_id;
     }
 }
 
