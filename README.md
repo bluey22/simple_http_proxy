@@ -72,7 +72,7 @@ telnet localhost 8002
 GET / HTTP/1.1
 Host: localhost
 ```
-# RESPONSE
+### RESPONSE
 ```bash
 HTTP/1.1 200 OK
 Server: nginx/1.18.0 (Ubuntu)
