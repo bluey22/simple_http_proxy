@@ -38,9 +38,7 @@ class ProxyServer:
     """
     An HTTP/1.1 Proxy Server that support pipelining and non-blocking I/O with epoll
     """
-    def __init__(
-        self, backend_config_path, proxy_host=LISTENER_ADDRESS, proxy_port=LISTENER_PORT
-    ):
+    def __init__(self, backend_config_path, proxy_host=LISTENER_ADDRESS, proxy_port=LISTENER_PORT):
         self.proxy_host = proxy_host
         self.proxy_port = proxy_port
 
@@ -133,70 +131,98 @@ class ProxyServer:
         conn_context.socket_type = SocketType.CLIENT_TO_PROXY
         conn_context.current_request = MessageBuilderHTTP()
         conn_context.current_response = MessageBuilderHTTP()
+        conn_context.address = addr
+        conn_context.file_descriptor = conn_file_no
         self.fd_to_socket_context[conn_file_no] = conn_context
-        logging.info(f"New connection from {addr}")
+        logging.info(f"Created new connection from {addr}")
 
 
     def handle_read_event(self, file_no):
         """
-        Handle incoming data from either a client or backend server, with support for pipelined messages
+        Handle incoming data from either a client or backend server
         """
         try:
-            # Get socket context and socket
+            # 1) Get socket context and socket
             socket_context = self.fd_to_socket_context[file_no]
             sock = self.fd_to_socket[file_no]
 
-            # Read data into recv_buffer
+            # 2) Read data into recv_buffer (if > BUF_SIZE, will be)
             data = sock.recv(BUF_SIZE)
+
             if not data:  # Connection closed by peer
                 self.close_connection(file_no)
                 return
 
+            # Append new data to existing recv buffer
             socket_context.recv_buffer.extend(data)
 
-            # Process the data while we can
-            while len(socket_context.recv_buffer) > 0:
-                # Try to identify complete messages in the buffer
-                messages = self._split_http_messages(socket_context.recv_buffer)
+            # Split buffer by potential message boundaries
+            messages = self._find_message_boundaries(socket_context.recv_buffer)
+
+            # Sanity check
+            if not messages:
+                logging.warning(f"No messages found, but there was data in the socket {data.decode("utf-8", errors="ignore")}")
+                return
+
+            # Process all messages
+            for i, message in enumerate(messages):
+
+                # First or only message may be a partial message
+                if socket_context.socket_type == SocketType.CLIENT_TO_PROXY:
+                    builder = socket_context.current_request if i == 0 else MessageBuilderHTTP()
+
+                else:
+                    builder = socket_context.current_response if i == 0 else MessageBuilderHTTP()
+
+                # Try to parse the message
+                bytes_consumed = builder.parse_data(message)
                 
-                if not messages:  # No complete messages found
-                    break
-                    
-                # Process all complete messages except the last one (which might be partial)
-                socket_context.recv_buffer = messages.pop()  # Last message becomes new recv_buffer
-                
-                for message in messages:  # Process all complete messages
-                    if socket_context.socket_type == SocketType.CLIENT_TO_PROXY:
-                        builder = MessageBuilderHTTP()
-                        builder.parse_data(message)
-                        if builder.is_complete():
-                            self._handle_complete_client_request(socket_context, builder)
-                    else:  # PROXY_TO_BACKEND
-                        builder = MessageBuilderHTTP()
-                        builder.parse_data(message)
-                        if builder.is_complete():
-                            self._handle_complete_backend_response(socket_context, builder)
-                
-                # Process any remaining data in recv_buffer using the current builder
-                if len(socket_context.recv_buffer) > 0:
-                    if socket_context.socket_type == SocketType.CLIENT_TO_PROXY:
-                        builder = socket_context.current_request
-                    else:
-                        builder = socket_context.current_response
-                    
-                    bytes_consumed = builder.parse_data(socket_context.recv_buffer)
-                    if bytes_consumed > 0:
-                        socket_context.recv_buffer = socket_context.recv_buffer[bytes_consumed:]
-                    
+                if bytes_consumed > 0:
                     if builder.is_complete():
+                        # Handle complete message for Client Request
                         if socket_context.socket_type == SocketType.CLIENT_TO_PROXY:
                             self._handle_complete_client_request(socket_context, builder)
-                            socket_context.current_request = MessageBuilderHTTP()
+
+                            if i == 0:  # Reset builder if it was the first message
+                                socket_context.current_request = MessageBuilderHTTP()
+
+                        # Handle complete message for Backend Response
                         else:
                             self._handle_complete_backend_response(socket_context, builder)
-                            socket_context.current_response = MessageBuilderHTTP()
+                            
+                            if i == 0:  # Reset builder if it was the first message
+                                socket_context.current_response = MessageBuilderHTTP()
+                    else:
+                        # Partial message - store in context
+                        if i == len(messages) - 1:  # Last message
+                            if socket_context.socket_type == SocketType.CLIENT_TO_PROXY:
+                                socket_context.current_request = builder
 
-            # Update epoll if we have data to send
+                            else:
+                                socket_context.current_response = builder
+                            socket_context.recv_buffer = message[bytes_consumed:]
+
+                        else:
+                            # Unexpected partial message in middle - something's wrong
+                            logging.error(f"Partial message in middle of sequence")
+                            self.close_connection(file_no)
+                            return
+                else:
+                    # Hopefully this never runs
+                    logging.warning(f"builder.parse_data on {message.decode("utf-8", errors="ignore")} consumed 0 bytes")
+                    
+                    # Couldn't parse anything - store remaining data
+                    if i == len(messages) - 1:  # Last message
+                        socket_context.recv_buffer = message
+                    else:
+                        # Couldn't parse non-last message - something's wrong
+                        logging.error(f"Could not parse message in sequence")
+                        self.close_connection(file_no)
+                        return
+
+            # Update epoll if we have data to send (little efficiency bump, otherwise we run the same as SELECT)
+            # NOTE: Other sockets will populate this socket's send_buffer with _handle_complete_backend_response() 
+            #       and _handle_complete_client_request() (LOOK FOR SEND_BUFFER.EXTEND())
             if len(socket_context.send_buffer) > 0:
                 self.epoll.modify(file_no, READ_WRITE)
 
@@ -215,8 +241,11 @@ class ProxyServer:
             sock = self.fd_to_socket[file_no]
 
             # Try to send as much data as possible
+            # NOTE: Validation and preprocessing comes from message handling. A promotion to the send buffer is a 
+            #       final promotion, meaning we can just send all we can
             if len(socket_context.send_buffer) > 0:
                 sent = sock.send(socket_context.send_buffer)
+
                 if sent > 0:
                     # Remove sent data from buffer
                     socket_context.send_buffer = socket_context.send_buffer[sent:]
@@ -233,6 +262,8 @@ class ProxyServer:
                         # If still nothing to send, modify epoll to read-only
                         if len(socket_context.send_buffer) == 0:
                             self.epoll.modify(file_no, READ_ONLY)
+                
+                # Else: Keep the send_buffer partially full, to be handled by next WRITE event (non-blocking)
 
         except (ConnectionError, socket.error) as e:
             logging.error(f"Error handling write event: {e}")
@@ -240,46 +271,36 @@ class ProxyServer:
 
 
     # -------------------------- Helper Methods: Read ---------------------------------
-    def _split_http_messages(self, buffer: bytearray) -> list[bytearray]:
+    def _find_message_boundaries(self, buffer: bytearray) -> list[bytearray]:
         """
-        Split buffer into individual HTTP messages
-        Returns a list of bytearrays, where the last element might be incomplete
+        Find HTTP message boundaries in the buffer
+        Returns a list of bytearrays, where first and/or last elements might be incomplete
         """
         messages = []
         current_pos = 0
         buffer_len = len(buffer)
         
         while current_pos < buffer_len:
-            # Find the end of headers
-            headers_end = buffer.find(b'\r\n\r\n', current_pos)
-            if headers_end == -1:
-                # No complete headers found, include rest of buffer as last message
+            # Look for start of a new HTTP message
+            next_message_start = -1
+            
+            # Search for common HTTP method/response patterns
+            for pattern in [b'GET ', b'POST ', b'PUT ', b'DELETE ', b'HEAD ', b'HTTP/']:
+                pos = buffer.find(pattern, current_pos + 1)  # +1 to avoid checking current_pos
+                if pos != -1:
+                    if next_message_start == -1 or pos < next_message_start:
+                        next_message_start = pos
+            
+            if next_message_start == -1:
+                # No more message boundaries found
                 messages.append(buffer[current_pos:])
                 break
                 
-            # Parse headers to get Content-Length
-            headers = buffer[current_pos:headers_end].split(b'\r\n')
-            content_length = 0
-            
-            for header in headers[1:]:  # Skip first line (request/status line)
-                if header.lower().startswith(b'content-length:'):
-                    try:
-                        content_length = int(header.split(b':', 1)[1].strip())
-                        break
-                    except (ValueError, IndexError):
-                        pass
-            
-            # Calculate total message length
-            total_length = headers_end + 4 + content_length  # headers + \r\n\r\n + body
-            
-            if current_pos + total_length > buffer_len:
-                # Incomplete message, include rest of buffer as last message
-                messages.append(buffer[current_pos:])
-                break
-                
-            # Extract complete message
-            messages.append(buffer[current_pos:current_pos + total_length])
-            current_pos += total_length
+            # Add chunk from current_pos to start of next message
+            current_chunk = buffer[current_pos:next_message_start]
+            if current_chunk:  # Only add non-empty chunks
+                messages.append(current_chunk)
+            current_pos = next_message_start
         
         if not messages:
             messages.append(buffer)
@@ -306,7 +327,6 @@ class ProxyServer:
         # 4. Select backend server (round-robin)
         backend = self.backend_servers[self.backend_index]
         self.backend_index = (self.backend_index + 1) % self.num_backends
-        backend_addr = f"{backend['ip']}:{backend['port']}"
 
         # 5. Get or create backend connection
         backend_fd = self._get_or_create_backend(backend)
@@ -346,27 +366,27 @@ class ProxyServer:
             # Get the next expected request ID
             expected_id = client_context.client_request_order[0]
             
-            # Look for matching response
+            # Look for matching response (HEAD OF LINE BLOCKING)
             for i, (resp_id, response) in enumerate(client_context.response_queue):
                 if resp_id == expected_id:
                     # Found matching response, remove from queues
                     client_context.client_request_order.popleft()
                     client_context.response_queue.remove((resp_id, response))
                     
-                    # Add to send buffer and clean up tracking
+                    # Add to send buffer and clean up tracking (ONE OF TWO SEND_BUFFER.EXTENDS)
                     client_context.send_buffer.extend(response.build_full_message())
                     del self.req_to_client[resp_id]
                     return
             
-            # If we didn't find the next expected response, we need to wait
+            # If we didn't find the next expected response, we need to wait until we do to flush messages in order
             break
         
 
     def _prepare_next_backend_request(self, backend_context: SocketContext):
         """Prepare the next request to send to the backend"""
         if backend_context.request_queue:
-            _, request = backend_context.request_queue.popleft()
-            backend_context.send_buffer.extend(request.build_full_message())
+            _, request = backend_context.request_queue.popleft()  # Pop a {x-req-id : MessageBuilderHTTP }
+            backend_context.send_buffer.extend(request.build_full_message())  # (ONE OF TWO SEND_BUFFER.EXTENDS)
 
 
     def _get_or_create_backend(self, backend):
@@ -394,6 +414,7 @@ class ProxyServer:
             backend_context.current_request = MessageBuilderHTTP()
             backend_context.current_response = MessageBuilderHTTP()
             backend_context.address = backend_addr
+            backend_context.file_descriptor = backend_fd
             self.fd_to_socket_context[backend_fd] = backend_context
             
             # Store mapping
