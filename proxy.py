@@ -134,7 +134,7 @@ class ProxyServer:
         conn_context.current_request = MessageBuilderHTTP()
         conn_context.current_response = MessageBuilderHTTP()
         self.fd_to_socket_context[conn_file_no] = conn_context
-        print(f"New connection from {addr}")
+        logging.info(f"New connection from {addr}")
 
 
     def handle_read_event(self, file_no):
@@ -427,11 +427,24 @@ class ProxyServer:
     def shutdown(self):
         """Shuts down the ProxyServer instance"""
         print("Shutting down server...")
+
+        # 1) Close all connection sockets
+        for fd, sock in self.fd_to_socket.items():
+            try:
+                logging.info(f"Closing socket {fd}...")
+                sock.close()
+            except Exception as e:
+                logging.error(f"Error closing socket {fd}: {e}")
+
+        self.fd_to_socket.clear()  # Clear the dictionary after closing all sockets
+
+        # 2) Close epoll instance
         if self.epoll:
-            self.epoll.unregister(
-                self.server_socket.fileno()
-            )  # untrack server socket from epoll
-            self.epoll.close()  # close epoll instance
+            self.epoll.unregister(self.server_socket.fileno())  # untrack server socket from epoll
+            self.epoll.close()
+
+        # 3) Close server socket
         if self.server_socket:
-            self.server_socket.close()  # close server socket
-        print("Server shut down.")
+            self.server_socket.close()
+        
+        logging.info("Server shut down.")
