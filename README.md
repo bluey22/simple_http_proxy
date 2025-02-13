@@ -67,14 +67,13 @@ We can now test our 3 web servers with ```bashcurl http://localhost:8001```, etc
 ## Example GET Request and Response:
 ### GET
 ```bash
-# CLI
 telnet localhost 8002
 
-# REQUEST
 GET / HTTP/1.1
 Host: localhost
-
+```
 # RESPONSE
+```bash
 HTTP/1.1 200 OK
 Server: nginx/1.18.0 (Ubuntu)
 Date: Thu, 13 Feb 2025 03:18:32 GMT
