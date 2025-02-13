@@ -64,6 +64,7 @@ class ProxyServer:
         # Maps address to fd: Map round robin address to exising connection from proxy
         self.address_to_fd: Dict[str, int] = {} # { key=IP-Address : val=file_no (backend)}
 
+
     def setup_server(self):
         """
         Initailizes the server listener socket and epoll for non-blocking IO
@@ -86,6 +87,8 @@ class ProxyServer:
             logging.error(f"Socket creation failed with error: {err}")
             exit(1)
 
+
+    # ---------------------------- Main Loop --------------------------------
     def run(self):
         """Main loop for the ProxyServer and listens for events with epoll"""
         try:
@@ -111,6 +114,7 @@ class ProxyServer:
         finally:
             self.shutdown()
 
+
     # ---------------------------- Event Methods --------------------------------
     def handle_new_connection(self):
         """
@@ -132,20 +136,282 @@ class ProxyServer:
         self.fd_to_socket_context[conn_file_no] = conn_context
         print(f"New connection from {addr}")
 
+
     def handle_read_event(self, file_no):
-        #TODO
-        pass
+        """
+        Handle incoming data from either a client or backend server, with support for pipelined messages
+        """
+        try:
+            # Get socket context and socket
+            socket_context = self.fd_to_socket_context[file_no]
+            sock = self.fd_to_socket[file_no]
+
+            # Read data into recv_buffer
+            data = sock.recv(BUF_SIZE)
+            if not data:  # Connection closed by peer
+                self.close_connection(file_no)
+                return
+
+            socket_context.recv_buffer.extend(data)
+
+            # Process the data while we can
+            while len(socket_context.recv_buffer) > 0:
+                # Try to identify complete messages in the buffer
+                messages = self._split_http_messages(socket_context.recv_buffer)
+                
+                if not messages:  # No complete messages found
+                    break
+                    
+                # Process all complete messages except the last one (which might be partial)
+                socket_context.recv_buffer = messages.pop()  # Last message becomes new recv_buffer
+                
+                for message in messages:  # Process all complete messages
+                    if socket_context.socket_type == SocketType.CLIENT_TO_PROXY:
+                        builder = MessageBuilderHTTP()
+                        builder.parse_data(message)
+                        if builder.is_complete():
+                            self._handle_complete_client_request(socket_context, builder)
+                    else:  # PROXY_TO_BACKEND
+                        builder = MessageBuilderHTTP()
+                        builder.parse_data(message)
+                        if builder.is_complete():
+                            self._handle_complete_backend_response(socket_context, builder)
+                
+                # Process any remaining data in recv_buffer using the current builder
+                if len(socket_context.recv_buffer) > 0:
+                    if socket_context.socket_type == SocketType.CLIENT_TO_PROXY:
+                        builder = socket_context.current_request
+                    else:
+                        builder = socket_context.current_response
+                    
+                    bytes_consumed = builder.parse_data(socket_context.recv_buffer)
+                    if bytes_consumed > 0:
+                        socket_context.recv_buffer = socket_context.recv_buffer[bytes_consumed:]
+                    
+                    if builder.is_complete():
+                        if socket_context.socket_type == SocketType.CLIENT_TO_PROXY:
+                            self._handle_complete_client_request(socket_context, builder)
+                            socket_context.current_request = MessageBuilderHTTP()
+                        else:
+                            self._handle_complete_backend_response(socket_context, builder)
+                            socket_context.current_response = MessageBuilderHTTP()
+
+            # Update epoll if we have data to send
+            if len(socket_context.send_buffer) > 0:
+                self.epoll.modify(file_no, READ_WRITE)
+
+        except (ConnectionError, socket.error) as e:
+            logging.error(f"Error handling read event: {e}")
+            self.close_connection(file_no)
+
 
     def handle_write_event(self, file_no):
-        #TODO
-        pass
+        """
+        Handle writing data to either a client or backend server
+        """
+        try:
+            # Get socket context
+            socket_context = self.fd_to_socket_context[file_no]
+            sock = self.fd_to_socket[file_no]
 
-    # -------------------------- Helper Methods ---------------------------------
+            # Try to send as much data as possible
+            if len(socket_context.send_buffer) > 0:
+                sent = sock.send(socket_context.send_buffer)
+                if sent > 0:
+                    # Remove sent data from buffer
+                    socket_context.send_buffer = socket_context.send_buffer[sent:]
+
+                    # If buffer is empty, prepare next message if available
+                    if len(socket_context.send_buffer) == 0:
+                        if socket_context.socket_type == SocketType.CLIENT_TO_PROXY:
+                            # For client, prepare next response
+                            self._prepare_next_client_response(socket_context)
+                        else:
+                            # For backend, prepare next request
+                            self._prepare_next_backend_request(socket_context)
+
+                        # If still nothing to send, modify epoll to read-only
+                        if len(socket_context.send_buffer) == 0:
+                            self.epoll.modify(file_no, READ_ONLY)
+
+        except (ConnectionError, socket.error) as e:
+            logging.error(f"Error handling write event: {e}")
+            self.close_connection(file_no)
+
+
+    # -------------------------- Helper Methods: Read ---------------------------------
+    def _split_http_messages(self, buffer: bytearray) -> list[bytearray]:
+        """
+        Split buffer into individual HTTP messages
+        Returns a list of bytearrays, where the last element might be incomplete
+        """
+        messages = []
+        current_pos = 0
+        buffer_len = len(buffer)
+        
+        while current_pos < buffer_len:
+            # Find the end of headers
+            headers_end = buffer.find(b'\r\n\r\n', current_pos)
+            if headers_end == -1:
+                # No complete headers found, include rest of buffer as last message
+                messages.append(buffer[current_pos:])
+                break
+                
+            # Parse headers to get Content-Length
+            headers = buffer[current_pos:headers_end].split(b'\r\n')
+            content_length = 0
+            
+            for header in headers[1:]:  # Skip first line (request/status line)
+                if header.lower().startswith(b'content-length:'):
+                    try:
+                        content_length = int(header.split(b':', 1)[1].strip())
+                        break
+                    except (ValueError, IndexError):
+                        pass
+            
+            # Calculate total message length
+            total_length = headers_end + 4 + content_length  # headers + \r\n\r\n + body
+            
+            if current_pos + total_length > buffer_len:
+                # Incomplete message, include rest of buffer as last message
+                messages.append(buffer[current_pos:])
+                break
+                
+            # Extract complete message
+            messages.append(buffer[current_pos:current_pos + total_length])
+            current_pos += total_length
+        
+        if not messages:
+            messages.append(buffer)
+            
+        return messages
+
+
+    def _handle_complete_client_request(self, client_context: SocketContext, request: MessageBuilderHTTP):
+        """Process a complete client request"""
+        # 1. Generate X-Request-ID if not present
+        if not request.x_request_id:
+            request.x_request_id = str(uuid.uuid4())
+            request.headers['X-Request-ID'] = request.x_request_id
+
+        request_id = request.x_request_id
+        
+        # 2. Store request ID to client mapping
+        self.req_to_client[request_id] = client_context.socket.fileno()
+        
+        # 3. Add to client's request order and queue
+        client_context.client_request_order.append(request_id)
+        client_context.request_queue.append((request_id, request))
+        
+        # 4. Select backend server (round-robin)
+        backend = self.backend_servers[self.backend_index]
+        self.backend_index = (self.backend_index + 1) % self.num_backends
+        backend_addr = f"{backend['ip']}:{backend['port']}"
+
+        # 5. Get or create backend connection
+        backend_fd = self._get_or_create_backend(backend)
+        if backend_fd:
+            backend_context = self.fd_to_socket_context[backend_fd]
+            # Add request to backend's queue and update its send buffer
+            if len(backend_context.send_buffer) == 0:
+                self._prepare_next_backend_request(backend_context)
+            self.epoll.modify(backend_fd, READ_WRITE)
+
+
+    def _handle_complete_backend_response(self, backend_context: SocketContext, response: MessageBuilderHTTP):
+        """Process a complete response from a backend server"""
+        # 1. Get request ID and client file descriptor
+        response_id = response.x_request_id
+        client_fd = self.req_to_client.get(response_id)
+        
+        if client_fd:
+            # 2. Get client context
+            client_context = self.fd_to_socket_context.get(client_fd)
+            if client_context:
+                # 3. Add response to client's queue
+                client_context.response_queue.append((response_id, response))
+                
+                # 4. If client's send buffer is empty, prepare next response
+                if len(client_context.send_buffer) == 0:
+                    self._prepare_next_client_response(client_context)
+                
+                # 5. Update epoll to write response
+                self.epoll.modify(client_fd, READ_WRITE)
+
+
+    # -------------------------- Helper Methods: Response ---------------------------------
+    def _prepare_next_client_response(self, client_context: SocketContext):
+        """Prepare the next response to send to the client"""
+        while client_context.response_queue and client_context.client_request_order:
+            # Get the next expected request ID
+            expected_id = client_context.client_request_order[0]
+            
+            # Look for matching response
+            for i, (resp_id, response) in enumerate(client_context.response_queue):
+                if resp_id == expected_id:
+                    # Found matching response, remove from queues
+                    client_context.client_request_order.popleft()
+                    client_context.response_queue.remove((resp_id, response))
+                    
+                    # Add to send buffer and clean up tracking
+                    client_context.send_buffer.extend(response.build_full_message())
+                    del self.req_to_client[resp_id]
+                    return
+            
+            # If we didn't find the next expected response, we need to wait
+            break
+        
+
+    def _prepare_next_backend_request(self, backend_context: SocketContext):
+        """Prepare the next request to send to the backend"""
+        if backend_context.request_queue:
+            _, request = backend_context.request_queue.popleft()
+            backend_context.send_buffer.extend(request.build_full_message())
+
+
+    def _get_or_create_backend(self, backend):
+        """Get existing backend connection or create a new one"""
+        backend_addr = f"{backend['ip']}:{backend['port']}"
+        
+        # Return existing connection if available
+        if backend_addr in self.address_to_fd:
+            return self.address_to_fd[backend_addr]
+        
+        try:
+            # Create new connection
+            backend_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            backend_sock.setblocking(False)
+            backend_sock.connect_ex((backend['ip'], backend['port']))
+            
+            # Register with epoll
+            backend_fd = backend_sock.fileno()
+            self.fd_to_socket[backend_fd] = backend_sock
+            self.epoll.register(backend_fd, READ_WRITE)
+            
+            # Create and register context
+            backend_context = SocketContext(backend_sock)
+            backend_context.socket_type = SocketType.PROXY_TO_BACKEND
+            backend_context.current_request = MessageBuilderHTTP()
+            backend_context.current_response = MessageBuilderHTTP()
+            backend_context.address = backend_addr
+            self.fd_to_socket_context[backend_fd] = backend_context
+            
+            # Store mapping
+            self.address_to_fd[backend_addr] = backend_fd
+            
+            return backend_fd
+            
+        except Exception as e:
+            logging.error(f"Error creating backend connection: {e}")
+            return None
+        
+    # -------------------------- Helper Methods: Proxy Server ---------------------------------
     def load_backend_servers(self, config_path):
         """Load backend servers list from a JSON config file"""
         with open(config_path, "r") as f:
             data = json.load(f)
         return data["backend_servers"]
+
 
     def close_connection(self, file_no):
         """Closes connection socket and deletes relevant data"""
@@ -156,6 +422,7 @@ class ProxyServer:
             if file_no in self.fd_to_socket_context:
                 del (self.fd_to_socket_context[file_no])
             print(f"Closed connection {file_no}")
+
 
     def shutdown(self):
         """Shuts down the ProxyServer instance"""
