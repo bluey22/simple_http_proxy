@@ -16,6 +16,105 @@ Implement a combination of an HTTP 1.1 proxy and a load balancer to explore:
 
 For testing purposes, we'll spin up 3 simple backend http servers that simply respond to GET requests with their own HTML page with a simeple text message
 
+## Benchmarking
+Here are the test commands and results. In terms of setting up the tests, that is detailed later below:
+
+Testing 500 requests to our proxy:
+```bash
+# Command:
+(.venv) $ ab -n 500 -c 10 -k http://127.0.0.1:9000/
+
+# Out
+This is ApacheBench, Version 2.3 <$Revision: 1879490 $>
+Copyright 1996 Adam Twiss, Zeus Technology Ltd, http://www.zeustech.net/
+Licensed to The Apache Software Foundation, http://www.apache.org/
+
+Benchmarking 127.0.0.1 (be patient)
+Completed 100 requests
+Completed 200 requests
+Completed 300 requests
+Completed 400 requests
+Completed 500 requests
+Finished 500 requests
+
+
+Server Software:        nginx/1.18.0
+Server Hostname:        127.0.0.1
+Server Port:            9000
+
+Document Path:          /
+Document Length:        50 bytes
+
+Concurrency Level:      10
+Time taken for tests:   0.051 seconds
+Complete requests:      500
+Failed requests:        0
+Keep-Alive requests:    500
+Total transferred:      173500 bytes
+HTML transferred:       25000 bytes
+Requests per second:    9845.04 [#/sec] (mean)
+Time per request:       1.016 [ms] (mean)
+Time per request:       0.102 [ms] (mean, across all concurrent requests)
+Transfer rate:          3336.16 [Kbytes/sec] received
+
+Connection Times (ms)
+              min  mean[+/-sd] median   max
+Connect:        0    0   0.0      0       0
+Processing:     0    1   0.3      1       2
+Waiting:        0    1   0.3      1       2
+Total:          0    1   0.3      1       2
+
+Percentage of the requests served within a certain time (ms)
+  50%      1
+  66%      1
+  75%      1
+  80%      1
+  90%      1
+  95%      1
+  98%      2
+  99%      2
+ 100%      2 (longest request)
+ ```
+
+Testing 10 threads with 1000 connections to our proxy
+
+```bash
+# Command:
+(.venv) $ wrk -t10 -c1000 -d10s --latency http://127.0.0.1:9000/
+
+# Output: (3 Backends)
+Running 10s test @ http://127.0.0.1:9000/
+  10 threads and 1000 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    77.40ms  122.09ms   1.99s    97.96%
+    Req/Sec     0.98k   765.09     8.04k    69.44%
+  Latency Distribution
+     50%   65.95ms
+     75%   85.41ms
+     90%   92.22ms
+     99%  677.97ms
+  89142 requests in 10.07s, 29.50MB read
+  Socket errors: connect 0, read 0, write 0, timeout 368
+Requests/sec:   8849.14
+Transfer/sec:      2.93MB
+
+# Output: (1 Backend - Slower and more timeouts) 
+Running 10s test @ http://127.0.0.1:9000/
+  10 threads and 1000 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    95.76ms  116.44ms   2.00s    98.34%
+    Req/Sec     1.01k   276.69     2.29k    71.69%
+  Latency Distribution
+     50%   82.76ms
+     75%   96.69ms
+     90%  110.11ms
+     99%  662.24ms
+  95088 requests in 10.05s, 31.47MB read
+  Socket errors: connect 0, read 0, write 0, timeout 326
+Requests/sec:   9464.35
+Transfer/sec:      3.13MB
+ ```
+
 ## VirtualBox Commands: 
 ```bash
 # View Actively Running VMs

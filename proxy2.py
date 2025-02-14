@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 # Constants
 LISTENER_ADDRESS = "127.0.0.1"
 LISTENER_PORT = 9000
-BUF_SIZE = 65536  # Increased from 4096 for better performance
+BUF_SIZE = 4096
 MAX_HEADERS_SIZE = 8192
 CONNECTION_QUEUE_LIMIT = 150
 
