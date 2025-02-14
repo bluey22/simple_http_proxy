@@ -19,6 +19,7 @@ class SocketContext:
         self.recv_buffer = bytearray()  # Can be reading a response to pass forward, or a request
 
         # Buffer Level 1: Partial HTTP Message in case of partial HTTP request after recv_buffer read (Promotion from Level 0)
+        self.current_response_id = None
         self.current_request: MessageBuilderHTTP = None
         self.current_response: MessageBuilderHTTP = None
 

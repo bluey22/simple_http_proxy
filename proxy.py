@@ -15,7 +15,7 @@ from utils import SocketType
 LISTENER_ADDRESS = "127.0.0.1"  # or '0.0.0.0', available on all network interfaces
 LISTENER_PORT = 9000
 BUF_SIZE = 4096
-CONNECTION_QUEUE_LIMIT = 100
+CONNECTION_QUEUE_LIMIT = 150
 
 BITERRS = [25, 24, 8, 16, 9, 17, 26, 10, 18]
 BUF_SIZE = 4096
@@ -266,7 +266,7 @@ class ProxyServer:
             # NOTE: Validation and preprocessing comes from message handling. A promotion to the send buffer is a 
             #       final promotion, meaning we can just send all we can
             if len(socket_context.send_buffer) > 0:
-                sent = sock.send(socket_context.send_buffer)
+                sent = sock.send(socket_context.send_buffer[:BUF_SIZE])
                 logging.info(f"Response sent from: {socket_context.address}")
 
                 if sent > 0:
@@ -345,7 +345,7 @@ class ProxyServer:
         # logging.debug("Received full client request, now forwarding to backend")
         # 1. Generate X-Request-ID if not present
         if not request.x_request_id:
-            request.x_request_id = str(uuid.uuid4()).strip()
+            request.x_request_id = str(uuid.uuid4())
             request.headers['X-Request-ID'] = request.x_request_id
 
         request_id = request.x_request_id
@@ -354,7 +354,7 @@ class ProxyServer:
         
         # 2. Store request ID to client mapping
         self.req_to_client[request_id] = client_context.file_descriptor 
-        # logging.debug(f"NEW STORAGE IN REQ_ID TO CLIENT {(request_id, client_context.file_descriptor )}")
+        logging.debug(f"NEW STORAGE IN REQ_ID TO CLIENT {(request_id, client_context.file_descriptor )}")
         
         # 3. Add to client's request order and queue
         client_context.client_request_order.append(request_id)
@@ -396,7 +396,7 @@ class ProxyServer:
         response_id =  str(response.x_request_id).strip()
         client_fd = self.req_to_client.get(response_id)
 
-        logging.debug(f"Received full backend response (id={type(response_id)}), now forwarding to client ({client_fd})")
+        logging.debug(f"Received full backend response (id={response_id}), now forwarding to client ({client_fd})")
         
         if client_fd:
             # 2. Get client context
@@ -411,6 +411,8 @@ class ProxyServer:
                 
                 # 5. Update epoll to write response
                 self.epoll.modify(client_fd, READ_WRITE)
+        else:
+            logging.error(f"Client FD for response {response_id} is None! Possible cause: Client disconnected early.")
 
 
     # -------------------------- Helper Methods: Response ---------------------------------
@@ -429,12 +431,11 @@ class ProxyServer:
                     
                     # Add to send buffer and clean up tracking (ONE OF TWO SEND_BUFFER.EXTENDS)
                     client_context.send_buffer.extend(response.build_full_message())
-                    del self.req_to_client[resp_id]
+                    # del self.req_to_client[resp_id]
                     return
             
             # If we didn't find the next expected response, we need to wait until we do to flush messages in order
             break
-        
 
     def _prepare_next_backend_request(self, backend_context: SocketContext):
         """Prepare the next request to send to the backend"""
