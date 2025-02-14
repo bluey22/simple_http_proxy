@@ -20,6 +20,8 @@ For testing purposes, we'll spin up 3 simple backend http servers that simply re
 A `proxy.py` file with the following components
 - A `HTTPMessage` dataclass to contain HTTP requests/responses across client-proxy and proxy-backend interactions
 - A `Connection` dataclass that contains metadata for the context for a socket connection
+- A `ProxyServer` http reverse proxy class that integrates with a JSON config of backend servers, accepts requests and load balances
+Running proxy.py (if __name__ = 'main') driver code runs the proxy server, all you need to do is have the nginx web servers created and you can load test
 
 ## Benchmarking
 Here are the test commands and results. In terms of setting up the tests, that is detailed later below:
