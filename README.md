@@ -85,19 +85,19 @@ Accept-Ranges: bytes
 
 <!DOCTYPE html>
 <html>
-<head>
-    <title>Server 8002</title>
-    <style>
-        body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; background-color: #f8f9fa; }
-        h1 { color: #28a745; }
-    </style>
-</head>
-<body>
-    <h1>Welcome to Server 8002</h1>
-    <p>This is a different web page served on port 8002.</p>
-</body>
+<h1>Welcome to the Load-Balanced Web Service</h1>
 </html>
 ```
+
+# Test HTTP/1.1 Load Balancing HTTP Proxy
+
+# Testing a single request
+```bash 
+# Run main.py in one terminal. In another, run the followiung
+curl -v http://127.0.0.1:9000/
+```
+
+# Testing pipelining
 
 # Notes:
 ## epoll()

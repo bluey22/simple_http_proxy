@@ -1,9 +1,11 @@
 # proxy.py
+import errno
 import json
 import socket
 import select
 import uuid
 import logging
+import re
 from typing import Dict
 from message_builder_http import MessageBuilderHTTP
 from connection import SocketContext
@@ -43,6 +45,7 @@ class ProxyServer:
 
         # 1) Load backend servers from JSON Config
         self.backend_servers = self.load_backend_servers(backend_config_path)
+        logging.debug(f"Backend Servers behind proxy: (\n{self.backend_servers}\n)")
         self.num_backends = len(self.backend_servers)
         self.backend_index = 0  # for round-robin
 
@@ -73,13 +76,13 @@ class ProxyServer:
             self.server_socket.bind((self.proxy_host, self.proxy_port))
             self.server_socket.listen(5)  # allow up to 5 queued connections
             self.server_socket.setblocking(False)  # non-blocking (accept(), recv(), and send() return immediately)
-            self.fd_to_socket[self.server_socket.fileno()] = (self.server_socket)  # register file descriptor to socket object
+            # self.fd_to_socket[self.server_socket.fileno()] = (self.server_socket)  # register file descriptor to socket object (NOT NEEDED FOR ENTRY)
             # Note: No register with self.fd_to_socket_context since this is purely the frontend socket for the proxy
 
             # 2. Set up epoll for non-blocking IO
             self.epoll = select.epoll()
             self.epoll.register(self.server_socket.fileno(), READ_ONLY)  # register file descriptor as read only
-            logging.info(f"Proxy Server started on {self.proxy_host}:{self.proxy_port}")
+            logging.info(f"Proxy Server started on {self.proxy_host}:{self.proxy_port}, with FD={self.server_socket.fileno()}")
         except socket.error as err:
             logging.error(f"Socket creation failed with error: {err}")
             exit(1)
@@ -122,6 +125,7 @@ class ProxyServer:
         conn_file_no = conn.fileno()
 
         # Register the socket file descriptor
+        logging.debug(f"Connection given FD={conn_file_no}")
         self.fd_to_socket[conn_file_no] = conn
         self.epoll.register(conn_file_no, READ_ONLY)
 
@@ -151,6 +155,7 @@ class ProxyServer:
             if not data:  # Connection closed by peer
                 self.close_connection(file_no)
                 return
+            logging.debug(f"Received data: {data[:100]}")
 
             # Append new data to existing recv buffer
             socket_context.recv_buffer.extend(data)
@@ -160,12 +165,16 @@ class ProxyServer:
 
             # Sanity check
             if not messages:
-                logging.warning(f"No messages found, but there was data in the socket {data.decode("utf-8", errors="ignore")}")
+                readable_data = data.decode("utf-8", errors="ignore")
+                logging.warning(f"No messages found, but there was data in the socket {readable_data}")
                 return
+
+            logging.debug(f"All Messages: {messages}")
 
             # Process all messages
             for i, message in enumerate(messages):
-
+                
+                logging.debug(f"Dealing with current message: {message}")
                 # First or only message may be a partial message
                 if socket_context.socket_type == SocketType.CLIENT_TO_PROXY:
                     builder = socket_context.current_request if i == 0 else MessageBuilderHTTP()
@@ -205,12 +214,13 @@ class ProxyServer:
 
                         else:
                             # Unexpected partial message in middle - something's wrong
-                            logging.error(f"Partial message in middle of sequence")
+                            logging.error(f"Partial message in middle of sequence. FD={file_no}")
                             self.close_connection(file_no)
                             return
                 else:
                     # Hopefully this never runs
-                    logging.warning(f"builder.parse_data on {message.decode("utf-8", errors="ignore")} consumed 0 bytes")
+                    readable_message = message.decode("utf-8", errors="ignore")
+                    logging.warning(f"builder.parse_data on {readable_message} consumed 0 bytes")
                     
                     # Couldn't parse anything - store remaining data
                     if i == len(messages) - 1:  # Last message
@@ -245,8 +255,8 @@ class ProxyServer:
             # NOTE: Validation and preprocessing comes from message handling. A promotion to the send buffer is a 
             #       final promotion, meaning we can just send all we can
             if len(socket_context.send_buffer) > 0:
-                sent = sock.sendall(socket_context.send_buffer)  # NOTE: Testing sendall
-                logging.info(f"Response sent to client: {socket_context.address}")
+                sent = sock.send(socket_context.send_buffer)
+                logging.info(f"Response sent from: {socket_context.address}")
 
                 if sent > 0:
                     # Remove sent data from buffer
@@ -265,10 +275,11 @@ class ProxyServer:
                         # If still nothing to send, modify epoll to read-only
                         if len(socket_context.send_buffer) == 0:
                             self.epoll.modify(file_no, READ_ONLY)
-                
-                # Else: Keep the send_buffer partially full, to be handled by next WRITE event (non-blocking)
 
-        except (ConnectionError, socket.error) as e:
+                # Else: Keep the send_buffer partially full, to be handled by next WRITE event (non-blocking)
+        except Exception as e:
+            logging.error(f"General Error hit in handle_write_event(): {e}")
+        except (Exception, ConnectionError, socket.error) as e:
             logging.error(f"Error handling write event: {e}")
             self.close_connection(file_no)
 
@@ -276,52 +287,63 @@ class ProxyServer:
     # -------------------------- Helper Methods: Read ---------------------------------
     def _find_message_boundaries(self, buffer: bytearray) -> list[bytearray]:
         """
-        Find HTTP message boundaries in the buffer
-        Returns a list of bytearrays, where first and/or last elements might be incomplete
+        Identify complete HTTP messages within the buffer.
+        Returns a list of complete messages while preserving incomplete ones.
         """
         messages = []
         current_pos = 0
         buffer_len = len(buffer)
-        
+
+        logging.debug(f"Checking buffer for boundaries: {buffer}")
+
         while current_pos < buffer_len:
-            # Look for start of a new HTTP message
-            next_message_start = -1
-            
-            # Search for common HTTP method/response patterns
-            for pattern in [b'GET ', b'POST ', b'PUT ', b'DELETE ', b'HEAD ', b'HTTP/']:
-                pos = buffer.find(pattern, current_pos + 1)  # +1 to avoid checking current_pos
-                if pos != -1:
-                    if next_message_start == -1 or pos < next_message_start:
-                        next_message_start = pos
-            
-            if next_message_start == -1:
-                # No more message boundaries found
+            # Look for the end of HTTP headers
+            header_end = buffer.find(b'\r\n\r\n', current_pos)
+
+            if header_end == -1:
+                # No complete headers found; return remaining data
                 messages.append(buffer[current_pos:])
                 break
-                
-            # Add chunk from current_pos to start of next message
-            current_chunk = buffer[current_pos:next_message_start]
-            if current_chunk:  # Only add non-empty chunks
-                messages.append(current_chunk)
-            current_pos = next_message_start
-        
-        if not messages:
-            messages.append(buffer)
+
+            # Parse the headers
+            header_part = buffer[current_pos:header_end].decode("utf-8", errors="ignore")
+            content_length_match = re.search(r"Content-Length:\s*(\d+)", header_part, re.IGNORECASE)
             
+            content_length = int(content_length_match.group(1)) if content_length_match else 0
+
+            # Calculate the full message length (headers + body)
+            message_end = header_end + 4 + content_length  # \r\n\r\n is 4 bytes
+            
+            if message_end > buffer_len:
+                # Not enough data for the full message, return what we have
+                messages.append(buffer[current_pos:])
+                break
+            
+            # Extract the full message (headers + body)
+            message = buffer[current_pos:message_end]
+            messages.append(message)
+
+            # Move to the next potential message start
+            current_pos = message_end
+
         return messages
 
 
     def _handle_complete_client_request(self, client_context: SocketContext, request: MessageBuilderHTTP):
         """Process a complete client request"""
+        logging.debug("Received full client request, now forwarding to backend")
         # 1. Generate X-Request-ID if not present
         if not request.x_request_id:
-            request.x_request_id = str(uuid.uuid4())
+            request.x_request_id = str(uuid.uuid4()).strip()
             request.headers['X-Request-ID'] = request.x_request_id
 
         request_id = request.x_request_id
+
+        logging.debug(f"Request {request.method} {request.path} assigned ID {request_id}")
         
         # 2. Store request ID to client mapping
-        self.req_to_client[request_id] = client_context.socket.fileno()
+        self.req_to_client[request_id] = client_context.file_descriptor 
+        logging.debug(f"NEW STORAGE IN REQ_ID TO CLIENT {(request_id, client_context.file_descriptor )}")
         
         # 3. Add to client's request order and queue
         client_context.client_request_order.append(request_id)
@@ -331,21 +353,39 @@ class ProxyServer:
         backend = self.backend_servers[self.backend_index]
         self.backend_index = (self.backend_index + 1) % self.num_backends
 
+        logging.debug(f"Forwarding request {request_id} to backend {backend['ip']}:{backend['port']}")
+
         # 5. Get or create backend connection
         backend_fd = self._get_or_create_backend(backend)
-        if backend_fd:
-            backend_context = self.fd_to_socket_context[backend_fd]
-            # Add request to backend's queue and update its send buffer
-            if len(backend_context.send_buffer) == 0:
-                self._prepare_next_backend_request(backend_context)
-            self.epoll.modify(backend_fd, READ_WRITE)
+
+        if backend_fd is None:
+            logging.error(f"Failed to obtain a backend connection for {request_id}")
+            return
+    
+        backend_context = self.fd_to_socket_context[backend_fd]
+
+        if not backend_context:
+            logging.error(f"No backend context found for FD {backend_fd}")
+            return
+
+        logging.debug(f"Backend context ready for request {request_id}, adding to send buffer")
+        
+        # 6. Add request to backend's queue and update its send buffer
+        backend_context.request_queue.append((request_id, request))
+        if len(backend_context.send_buffer) == 0:
+            self._prepare_next_backend_request(backend_context)
+
+        self.epoll.modify(backend_fd, READ_WRITE)
+        logging.debug(f"Modified backend FD {backend_fd} for WRITE event")
 
 
     def _handle_complete_backend_response(self, backend_context: SocketContext, response: MessageBuilderHTTP):
         """Process a complete response from a backend server"""
         # 1. Get request ID and client file descriptor
-        response_id = response.x_request_id
+        response_id =  str(response.x_request_id).strip()
         client_fd = self.req_to_client.get(response_id)
+
+        logging.debug(f"MAP HERE:{self.req_to_client}\nReceived full backend response (id={type(response_id)}), now forwarding to client ({client_fd})\n")
         
         if client_fd:
             # 2. Get client context
@@ -388,8 +428,14 @@ class ProxyServer:
     def _prepare_next_backend_request(self, backend_context: SocketContext):
         """Prepare the next request to send to the backend"""
         if backend_context.request_queue:
-            _, request = backend_context.request_queue.popleft()  # Pop a {x-req-id : MessageBuilderHTTP }
+            request_id, request = backend_context.request_queue.popleft()  # Pop a {x-req-id : MessageBuilderHTTP }
             backend_context.send_buffer.extend(request.build_full_message())  # (ONE OF TWO SEND_BUFFER.EXTENDS)
+
+            logging.debug(f"Prepared request {request_id} for backend, buffer size: {len(backend_context.send_buffer)}")
+
+            # Make sure we enable EPOLLOUT so it actually sends
+            self.epoll.modify(backend_context.file_descriptor, READ_WRITE)
+            logging.debug(f"Enabled WRITE event for backend FD {backend_context.file_descriptor}")
 
 
     def _get_or_create_backend(self, backend):
@@ -398,13 +444,19 @@ class ProxyServer:
         
         # Return existing connection if available
         if backend_addr in self.address_to_fd:
+            logging.debug(f"Reusing existing backend connection {backend_addr}")
             return self.address_to_fd[backend_addr]
         
         try:
+            logging.debug(f"Creating new connection to backend {backend_addr}")
             # Create new connection
             backend_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             backend_sock.setblocking(False)
-            backend_sock.connect_ex((backend['ip'], backend['port']))
+            result = backend_sock.connect_ex((backend['ip'], backend['port']))
+            
+            if result not in (0, errno.EINPROGRESS):
+                logging.error(f"Backend connection failed immediately with code {result}")
+                return None
             
             # Register with epoll
             backend_fd = backend_sock.fileno()
@@ -423,6 +475,7 @@ class ProxyServer:
             # Store mapping
             self.address_to_fd[backend_addr] = backend_fd
             
+            logging.debug(f"Backend connection established to {backend_addr} (FD {backend_fd})")
             return backend_fd
             
         except Exception as e:
@@ -439,6 +492,7 @@ class ProxyServer:
 
     def close_connection(self, file_no):
         """Closes connection socket and deletes relevant data"""
+        logging.debug(f"Close_Connection() called on FD={file_no}")
         if file_no in self.fd_to_socket:
             self.epoll.unregister(file_no)  # untrack from epoll
             self.fd_to_socket[file_no].close()  # close socket
@@ -451,6 +505,7 @@ class ProxyServer:
     def shutdown(self):
         """Shuts down the ProxyServer instance"""
         logging.info("Shutting down server...")
+        logging.debug(f"Server Socket FD: {self.server_socket.fileno()}")
 
         # 1) Close all connection sockets
         for fd, sock in self.fd_to_socket.items():

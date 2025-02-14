@@ -11,7 +11,7 @@ class SocketContext:
     """
     def __init__(self, socket):
         self.socket_type: SocketType = None  # Enum, CLIENT_TO_PROXY or PROXY_TO_BACKEND
-        self.file_descriptor: int = -1
+        self.file_descriptor: int = None
         self.socket = socket
         self.address: str = ""
 
