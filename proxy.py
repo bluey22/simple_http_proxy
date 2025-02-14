@@ -45,7 +45,7 @@ class ProxyServer:
 
         # 1) Load backend servers from JSON Config
         self.backend_servers = self.load_backend_servers(backend_config_path)
-        logging.debug(f"Backend Servers behind proxy: (\n{self.backend_servers}\n)")
+        logging.debug(f"Backend Servers behind proxy: ({self.backend_servers})")
         self.num_backends = len(self.backend_servers)
         self.backend_index = 0  # for round-robin
 
@@ -97,21 +97,31 @@ class ProxyServer:
 
                 for file_no, event in events:
                     if file_no == self.server_socket.fileno():
+                        logging.debug(f"run() - CASE 1: handling connection event for FD={file_no}")
+
                         # Case 1: New client is connecting
                         self.handle_new_connection()
 
                     elif event & (select.EPOLLIN | select.EPOLLPRI):
+                        logging.debug(f"run() - CASE 2: handling read event for FD={file_no}")
+
                         # Case 2: Data from client/backend (new data or connection closed packet)
                         self.handle_read_event(file_no)
 
                     elif event & select.EPOLLOUT:
+                        logging.debug(f"run() - CASE 3: handling write event for FD={file_no}")
+
                         # Case 3: Socket is ready to send data
                         self.handle_write_event(file_no)
 
                     elif event in BITERRS:
                         # Case 4: error handling
+                        logging.error(f"Epoll event in BITERRS, calling close to connection on FD={file_no}")
                         self.close_connection(file_no)
+        except Exception as e:
+            logging.error(f"Exception in main run() loop: {e}")
         finally:
+            logging.info("Shutting down proxy server")
             self.shutdown()
 
 
@@ -153,6 +163,7 @@ class ProxyServer:
             data = sock.recv(BUF_SIZE)
 
             if not data:  # Connection closed by peer
+                logging.debug(f"Client closed connection FD={file_no}")
                 self.close_connection(file_no)
                 return
             logging.debug(f"Received data: {data[:100]}")
@@ -294,7 +305,7 @@ class ProxyServer:
         current_pos = 0
         buffer_len = len(buffer)
 
-        logging.debug(f"Checking buffer for boundaries: {buffer}")
+        logging.debug(f"Checking buffer for boundaries")
 
         while current_pos < buffer_len:
             # Look for the end of HTTP headers
@@ -385,7 +396,7 @@ class ProxyServer:
         response_id =  str(response.x_request_id).strip()
         client_fd = self.req_to_client.get(response_id)
 
-        logging.debug(f"MAP HERE:{self.req_to_client}\nReceived full backend response (id={type(response_id)}), now forwarding to client ({client_fd})\n")
+        logging.debug(f"Received full backend response (id={type(response_id)}), now forwarding to client ({client_fd})")
         
         if client_fd:
             # 2. Get client context
@@ -492,14 +503,16 @@ class ProxyServer:
 
     def close_connection(self, file_no):
         """Closes connection socket and deletes relevant data"""
-        logging.debug(f"Close_Connection() called on FD={file_no}")
+        logging.debug(f"Close_Connection() called on FD={file_no}: Addr={self.fd_to_socket_context[file_no].address}")
         if file_no in self.fd_to_socket:
-            self.epoll.unregister(file_no)  # untrack from epoll
-            self.fd_to_socket[file_no].close()  # close socket
-            del (self.fd_to_socket[file_no])
-            if file_no in self.fd_to_socket_context:
-                del (self.fd_to_socket_context[file_no])
-            logging.info(f"Closed connection to {self.fd_to_socket_context[file_no].address}")
+            try:
+                self.epoll.unregister(file_no)  # untrack from epoll
+                self.fd_to_socket[file_no].close()  # close socket
+                del (self.fd_to_socket[file_no])
+                if file_no in self.fd_to_socket_context:
+                    del (self.fd_to_socket_context[file_no])
+            except Exception as e:
+                logging.debug(f"Failed to close connection with error: {e}")
 
 
     def shutdown(self):
