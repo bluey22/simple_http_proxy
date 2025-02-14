@@ -192,13 +192,13 @@ Accept-Ranges: bytes
 
 # Testing a single request
 ```bash 
-# Run main.py in one terminal. In another, run the followiung
+# Run proxy.py in one terminal. In another, run the followiung
 curl -v http://127.0.0.1:9000/
 ```
 
 # Testing pipelining
 ```bash 
-# Run proxy2.py in one terminal. In another, test 500 requests:
+# Run proxy.py in one terminal. In another, test 500 requests:
 ab -n 500 -c 10 -k http://127.0.0.1:9000/
 
 # For limit testing, in another, run the followiung for limit testing
