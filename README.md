@@ -203,9 +203,6 @@ ab -n 500 -c 10 -k http://127.0.0.1:9000/
 
 # For limit testing, in another, run the followiung for limit testing
 wrk -t10 -c1000 -d10s --latency http://127.0.0.1:9000/
-
-# Results: If we only have 1 server in the server.conf, you can see that the latency is slightly higher, 
-#   and the number of requesets per second is a third
 ```
 
 # Notes:
