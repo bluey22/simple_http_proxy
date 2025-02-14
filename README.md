@@ -207,9 +207,9 @@ python -m venv .venv
 pip list > requirements.txt
 ```
 
-## Test HTTP/1.1 Load Balancing HTTP Proxy
+# Test HTTP/1.1 Load Balancing HTTP Proxy
 
-# Testing a single request
+## Testing a single request
 ```bash 
 # Run proxy.py in one terminal. In another, run the followiung
 curl -v http://127.0.0.1:9000/
