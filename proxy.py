@@ -15,6 +15,7 @@ from utils import SocketType
 LISTENER_ADDRESS = "127.0.0.1"  # or '0.0.0.0', available on all network interfaces
 LISTENER_PORT = 9000
 BUF_SIZE = 4096
+CONNECTION_QUEUE_LIMIT = 100
 
 BITERRS = [25, 24, 8, 16, 9, 17, 26, 10, 18]
 BUF_SIZE = 4096
@@ -74,7 +75,7 @@ class ProxyServer:
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  # creates a new TCP/IP socke
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # socket option: allows immediate reuse of the same port
             self.server_socket.bind((self.proxy_host, self.proxy_port))
-            self.server_socket.listen(5)  # allow up to 5 queued connections
+            self.server_socket.listen(CONNECTION_QUEUE_LIMIT)  # allow up to N queued connections
             self.server_socket.setblocking(False)  # non-blocking (accept(), recv(), and send() return immediately)
             # self.fd_to_socket[self.server_socket.fileno()] = (self.server_socket)  # register file descriptor to socket object (NOT NEEDED FOR ENTRY)
             # Note: No register with self.fd_to_socket_context since this is purely the frontend socket for the proxy
@@ -97,19 +98,19 @@ class ProxyServer:
 
                 for file_no, event in events:
                     if file_no == self.server_socket.fileno():
-                        logging.debug(f"run() - CASE 1: handling connection event for FD={file_no}")
+                        # logging.debug(f"run() - CASE 1: handling connection event for FD={file_no}")
 
                         # Case 1: New client is connecting
                         self.handle_new_connection()
 
                     elif event & (select.EPOLLIN | select.EPOLLPRI):
-                        logging.debug(f"run() - CASE 2: handling read event for FD={file_no}")
+                        # logging.debug(f"run() - CASE 2: handling read event for FD={file_no}")
 
                         # Case 2: Data from client/backend (new data or connection closed packet)
                         self.handle_read_event(file_no)
 
                     elif event & select.EPOLLOUT:
-                        logging.debug(f"run() - CASE 3: handling write event for FD={file_no}")
+                        # logging.debug(f"run() - CASE 3: handling write event for FD={file_no}")
 
                         # Case 3: Socket is ready to send data
                         self.handle_write_event(file_no)
@@ -135,7 +136,7 @@ class ProxyServer:
         conn_file_no = conn.fileno()
 
         # Register the socket file descriptor
-        logging.debug(f"Connection given FD={conn_file_no}")
+        # logging.debug(f"Connection given FD={conn_file_no}")
         self.fd_to_socket[conn_file_no] = conn
         self.epoll.register(conn_file_no, READ_ONLY)
 
@@ -163,10 +164,9 @@ class ProxyServer:
             data = sock.recv(BUF_SIZE)
 
             if not data:  # Connection closed by peer
-                logging.debug(f"Client closed connection FD={file_no}")
                 self.close_connection(file_no)
                 return
-            logging.debug(f"Received data: {data[:100]}")
+            # logging.debug(f"Received data: {data[:100]}")
 
             # Append new data to existing recv buffer
             socket_context.recv_buffer.extend(data)
@@ -180,12 +180,12 @@ class ProxyServer:
                 logging.warning(f"No messages found, but there was data in the socket {readable_data}")
                 return
 
-            logging.debug(f"All Messages: {messages}")
+            # logging.debug(f"All Messages: {messages}")
 
             # Process all messages
             for i, message in enumerate(messages):
                 
-                logging.debug(f"Dealing with current message: {message}")
+                # logging.debug(f"Dealing with current message: {message}")
                 # First or only message may be a partial message
                 if socket_context.socket_type == SocketType.CLIENT_TO_PROXY:
                     builder = socket_context.current_request if i == 0 else MessageBuilderHTTP()
@@ -305,7 +305,7 @@ class ProxyServer:
         current_pos = 0
         buffer_len = len(buffer)
 
-        logging.debug(f"Checking buffer for boundaries")
+        # logging.debug(f"Checking buffer for boundaries")
 
         while current_pos < buffer_len:
             # Look for the end of HTTP headers
@@ -342,7 +342,7 @@ class ProxyServer:
 
     def _handle_complete_client_request(self, client_context: SocketContext, request: MessageBuilderHTTP):
         """Process a complete client request"""
-        logging.debug("Received full client request, now forwarding to backend")
+        # logging.debug("Received full client request, now forwarding to backend")
         # 1. Generate X-Request-ID if not present
         if not request.x_request_id:
             request.x_request_id = str(uuid.uuid4()).strip()
@@ -350,11 +350,11 @@ class ProxyServer:
 
         request_id = request.x_request_id
 
-        logging.debug(f"Request {request.method} {request.path} assigned ID {request_id}")
+        logging.debug(f"REQUEST: {request.method} {request.path} assigned ID {request_id}")
         
         # 2. Store request ID to client mapping
         self.req_to_client[request_id] = client_context.file_descriptor 
-        logging.debug(f"NEW STORAGE IN REQ_ID TO CLIENT {(request_id, client_context.file_descriptor )}")
+        # logging.debug(f"NEW STORAGE IN REQ_ID TO CLIENT {(request_id, client_context.file_descriptor )}")
         
         # 3. Add to client's request order and queue
         client_context.client_request_order.append(request_id)
@@ -455,11 +455,11 @@ class ProxyServer:
         
         # Return existing connection if available
         if backend_addr in self.address_to_fd:
-            logging.debug(f"Reusing existing backend connection {backend_addr}")
+            # logging.debug(f"Reusing existing backend connection {backend_addr}")
             return self.address_to_fd[backend_addr]
         
         try:
-            logging.debug(f"Creating new connection to backend {backend_addr}")
+            # logging.debug(f"Creating new connection to backend {backend_addr}")
             # Create new connection
             backend_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             backend_sock.setblocking(False)
@@ -518,7 +518,6 @@ class ProxyServer:
     def shutdown(self):
         """Shuts down the ProxyServer instance"""
         logging.info("Shutting down server...")
-        logging.debug(f"Server Socket FD: {self.server_socket.fileno()}")
 
         # 1) Close all connection sockets
         for fd, sock in self.fd_to_socket.items():
