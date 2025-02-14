@@ -1,3 +1,4 @@
+# proxy.py
 import errno
 import json
 import socket
@@ -27,7 +28,7 @@ logging.basicConfig(
 
 @dataclass
 class HTTPMessage:
-    """Efficient HTTP message container"""
+    """HTTP message container"""
     headers: Dict[str, str] = field(default_factory=dict)
     body: bytearray = field(default_factory=bytearray)
     method: str = ""
@@ -36,12 +37,12 @@ class HTTPMessage:
     status_code: str = ""
     status_text: str = ""
     content_length: int = 0
-    is_response: bool = False
+    is_response: bool = False  # Otherwise is a request
     keep_alive: bool = True
-    x_request_id: Optional[str] = None
+    x_request_id: Optional[str] = None  # Added into header for routing (load-balancing)
 
     def build(self) -> bytes:
-        """Build HTTP message efficiently"""
+        """Convert this HTTPMessage to a byte message"""
         parts = []
         if self.is_response:
             parts.append(f"{self.version} {self.status_code} {self.status_text}\r\n")
@@ -49,7 +50,7 @@ class HTTPMessage:
             parts.append(f"{self.method} {self.path} {self.version}\r\n")
         
         for k, v in self.headers.items():
-            parts.append(f"{k}: {v}\r\n")
+            parts.append(f"{k}: {v}\r\n")  # "\r\n" = (Carriage Return + Line Feed)
         
         parts.append("\r\n")
         message = "".join(parts).encode()
@@ -62,18 +63,18 @@ class HTTPMessage:
 class Connection:
     """Connection state manager"""
     socket: socket.socket
-    addr: tuple
-    input_buffer: bytearray = field(default_factory=bytearray)
-    output_buffer: bytearray = field(default_factory=bytearray)
-    current_message: Optional[HTTPMessage] = None
-    pending_requests: deque = field(default_factory=deque)
-    pending_responses: deque = field(default_factory=deque)
-    request_order: deque = field(default_factory=deque)
-    headers_complete: bool = False
-    headers_size: int = 0
-    body_received: int = 0
-    is_backend: bool = False
-    keep_alive: bool = True
+    addr: tuple  # (IP, Port)
+    input_buffer: bytearray = field(default_factory=bytearray)   # Read buffer: received from the socket but not yet processed
+    output_buffer: bytearray = field(default_factory=bytearray)  # Write buffer: stores outgoing raw bytes waiting to be sent to THIS socket connection
+    current_message: Optional[HTTPMessage] = None                # The current HTTP message being processed (For partial/chunked HTTP requests)
+    pending_requests: deque = field(default_factory=deque)       # Queue of HTTP Requests
+    pending_responses: deque = field(default_factory=deque)      # Queue of HTTP Responses
+    request_order: deque = field(default_factory=deque)          # Tracks order of requests for Head-Of-Line blocking in our pipelining
+    headers_complete: bool = False  # Flag indicating if the current message has complete headers
+    headers_size: int = 0           # Tracks the size of received headers and enforces limits
+    body_received: int = 0          # Flag indicating if the current message has a complete body
+    is_backend: bool = False        # Otherwise is aclient connection
+    keep_alive: bool = True         # HTTP/1.1 "Persistent" Connections
 
 class ProxyServer:
     def __init__(self, config_path: str):

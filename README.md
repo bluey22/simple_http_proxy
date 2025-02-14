@@ -16,6 +16,11 @@ Implement a combination of an HTTP 1.1 proxy and a load balancer to explore:
 
 For testing purposes, we'll spin up 3 simple backend http servers that simply respond to GET requests with their own HTML page with a simeple text message
 
+## Project Solution
+A `proxy.py` file with the following components
+- A `HTTPMessage` dataclass to contain HTTP requests/responses across client-proxy and proxy-backend interactions
+- A `Connection` dataclass that contains metadata for the context for a socket connection
+
 ## Benchmarking
 Here are the test commands and results. In terms of setting up the tests, that is detailed later below:
 
@@ -127,7 +132,8 @@ VBoxManage startvm Ubuntu --type headless
 VBoxManage controlvm Ubuntu savestate
 ```
 
-# Configuring Our Backends:
+# Set Up:
+## Configuring Our Backends:
 For testing, we run 3 backends (8001, 8002, 8003). Here is the following site for 8001.
 ```bash
 # /etc/nginx/sites-available/site_8001
@@ -188,8 +194,22 @@ Accept-Ranges: bytes
 </html>
 ```
 
-# Testing the HTTP/1.1 Load Balancing HTTP Proxy (after following above config)
-## Testing a single request
+## Set up environment to run code
+
+```bash
+# Create the virtual environment
+python -m venv .venv
+
+# Activate
+.venv\Scripts\activate
+
+# Install packages
+pip list > requirements.txt
+```
+
+## Test HTTP/1.1 Load Balancing HTTP Proxy
+
+# Testing a single request
 ```bash 
 # Run proxy.py in one terminal. In another, run the followiung
 curl -v http://127.0.0.1:9000/
