@@ -25,7 +25,7 @@ A `proxy.py` file with the following components
 Running proxy.py (if __name__ = 'main') driver code runs the proxy server, all you need to do is have the nginx web servers created and you can load test
 
 ## ToDos
-- Set up heartbeat from proxy to backends to rotate out a dead backend from the rotation
+- Set up heartbeat from proxy to backends to rotate out a dead backend from the rotation [a link](https://github.com/bluey22/simple_http_proxy/issues/1)
 - ...
 
 ## Benchmarking
